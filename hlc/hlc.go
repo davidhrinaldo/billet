@@ -2,6 +2,12 @@
 // across distributed nodes with unreliable wall clocks. It combines a physical
 // timestamp (nanoseconds) with a bounded logical counter to preserve causality
 // without requiring synchronized time.
+//
+// Based on the algorithm described in:
+//
+//	Kulkarni, S., Demirbas, M., Madappa, D., Avva, B., & Leone, M. (2014).
+//	"Logical Physical Clocks and Consistent Snapshots in Globally Distributed
+//	Databases." https://cse.buffalo.edu/tech-reports/2014-04.pdf
 package hlc
 
 import (

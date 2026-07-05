@@ -202,6 +202,111 @@ func TestListOps(t *testing.T) {
 	}
 }
 
+func TestTruncateOps(t *testing.T) {
+	allOps := []shadow.Op{
+		{ID: shadow.OpID{NodeID: 1, Seq: 1}, DeviceID: "dev-1", Timestamp: hlc.Timestamp{Physical: 100}},
+		{ID: shadow.OpID{NodeID: 1, Seq: 2}, DeviceID: "dev-1", Timestamp: hlc.Timestamp{Physical: 200}},
+		{ID: shadow.OpID{NodeID: 1, Seq: 3}, DeviceID: "dev-1", Timestamp: hlc.Timestamp{Physical: 300}},
+		{ID: shadow.OpID{NodeID: 1, Seq: 4}, DeviceID: "dev-2", Timestamp: hlc.Timestamp{Physical: 150}},
+	}
+
+	tests := []struct {
+		name         string
+		device       shadow.DeviceID
+		before       hlc.Timestamp
+		wantRemoved  int
+		wantDev1Ops  int
+		wantDev2Ops  int
+		wantHasSeq1  bool
+		wantHasSeq2  bool
+	}{
+		{
+			name:         "truncate none when cutoff is before all ops",
+			device:       "dev-1",
+			before:       hlc.Timestamp{Physical: 50},
+			wantRemoved:  0,
+			wantDev1Ops:  3,
+			wantDev2Ops:  1,
+			wantHasSeq1:  true,
+			wantHasSeq2:  true,
+		},
+		{
+			name:         "truncate first two ops",
+			device:       "dev-1",
+			before:       hlc.Timestamp{Physical: 300},
+			wantRemoved:  2,
+			wantDev1Ops:  1,
+			wantDev2Ops:  1,
+			wantHasSeq1:  false,
+			wantHasSeq2:  false,
+		},
+		{
+			name:         "truncate does not affect other devices",
+			device:       "dev-1",
+			before:       hlc.Timestamp{Physical: 500},
+			wantRemoved:  3,
+			wantDev1Ops:  0,
+			wantDev2Ops:  1,
+			wantHasSeq1:  false,
+			wantHasSeq2:  false,
+		},
+		{
+			name:         "truncate nonexistent device removes nothing",
+			device:       "dev-99",
+			before:       hlc.Timestamp{Physical: 500},
+			wantRemoved:  0,
+			wantDev1Ops:  3,
+			wantDev2Ops:  1,
+			wantHasSeq1:  true,
+			wantHasSeq2:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := New()
+			for _, op := range allOps {
+				if err := s.AppendOp(op); err != nil {
+					t.Fatalf("AppendOp: %v", err)
+				}
+			}
+
+			removed, err := s.TruncateOps(tt.device, tt.before)
+			if err != nil {
+				t.Fatalf("TruncateOps: %v", err)
+			}
+			if removed != tt.wantRemoved {
+				t.Errorf("removed = %d, want %d", removed, tt.wantRemoved)
+			}
+
+			dev1Ops, err := s.ListOps("dev-1")
+			if err != nil {
+				t.Fatalf("ListOps(dev-1): %v", err)
+			}
+			if len(dev1Ops) != tt.wantDev1Ops {
+				t.Errorf("dev-1 ops = %d, want %d", len(dev1Ops), tt.wantDev1Ops)
+			}
+
+			dev2Ops, err := s.ListOps("dev-2")
+			if err != nil {
+				t.Fatalf("ListOps(dev-2): %v", err)
+			}
+			if len(dev2Ops) != tt.wantDev2Ops {
+				t.Errorf("dev-2 ops = %d, want %d", len(dev2Ops), tt.wantDev2Ops)
+			}
+
+			hasSeq1, _ := s.HasOp(shadow.OpID{NodeID: 1, Seq: 1})
+			if hasSeq1 != tt.wantHasSeq1 {
+				t.Errorf("HasOp(seq=1) = %v, want %v", hasSeq1, tt.wantHasSeq1)
+			}
+			hasSeq2, _ := s.HasOp(shadow.OpID{NodeID: 1, Seq: 2})
+			if hasSeq2 != tt.wantHasSeq2 {
+				t.Errorf("HasOp(seq=2) = %v, want %v", hasSeq2, tt.wantHasSeq2)
+			}
+		})
+	}
+}
+
 func TestHasOp(t *testing.T) {
 	tests := []struct {
 		name    string

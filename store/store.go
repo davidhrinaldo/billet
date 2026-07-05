@@ -5,6 +5,7 @@ package store
 import (
 	"errors"
 
+	"github.com/davidhrinaldo/billet/hlc"
 	"github.com/davidhrinaldo/billet/shadow"
 )
 
@@ -33,4 +34,8 @@ type Store interface {
 
 	// HasOp reports whether an op with the given ID has been recorded.
 	HasOp(id shadow.OpID) (bool, error)
+
+	// TruncateOps removes all ops for a device with timestamps strictly before
+	// the given cutoff. It returns the number of ops removed.
+	TruncateOps(deviceID shadow.DeviceID, before hlc.Timestamp) (int, error)
 }

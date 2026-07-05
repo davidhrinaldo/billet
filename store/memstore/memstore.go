@@ -91,3 +91,23 @@ func (s *MemStore) HasOp(id shadow.OpID) (bool, error) {
 	_, exists := s.seen[id]
 	return exists, nil
 }
+
+// TruncateOps removes all ops for a device with timestamps strictly before
+// the given cutoff. It returns the number of ops removed.
+func (s *MemStore) TruncateOps(deviceID shadow.DeviceID, before hlc.Timestamp) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	removed := 0
+	kept := s.ops[:0]
+	for _, op := range s.ops {
+		if op.DeviceID == deviceID && op.Timestamp.Before(before) {
+			delete(s.seen, op.ID)
+			removed++
+		} else {
+			kept = append(kept, op)
+		}
+	}
+	s.ops = kept
+	return removed, nil
+}
