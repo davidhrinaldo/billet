@@ -384,5 +384,164 @@ func TestTruncate(t *testing.T) {
 	}
 }
 
+func TestPolicyMaxOps(t *testing.T) {
+	tests := []struct {
+		name         string
+		maxOps       int
+		appendCount  int
+		wantOpsAfter int
+		wantDocKey   string // if set, verify doc has this reported key
+	}{
+		{
+			name:         "under threshold no compaction",
+			maxOps:       5,
+			appendCount:  5,
+			wantOpsAfter: 5,
+		},
+		{
+			name:         "exceeding threshold triggers snapshot",
+			maxOps:       3,
+			appendCount:  4,
+			wantOpsAfter: 0,
+			wantDocKey:   "k-3",
+		},
+		{
+			name:         "exactly at threshold no compaction",
+			maxOps:       3,
+			appendCount:  3,
+			wantOpsAfter: 3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := memstore.New()
+			l := New(s, WithPolicy(Policy{MaxOps: tt.maxOps}))
+
+			for i := range tt.appendCount {
+				op := shadow.Op{
+					ID:        shadow.OpID{NodeID: 1, Seq: uint64(i + 1)},
+					DeviceID:  "dev-1",
+					Section:   shadow.SectionReported,
+					Key:       "k-" + itoa(i),
+					Data:      []byte("v"),
+					Timestamp: hlc.Timestamp{Physical: int64((i + 1) * 100)},
+				}
+				if err := l.Append(op); err != nil {
+					t.Fatalf("Append %d: %v", i, err)
+				}
+			}
+
+			ops, err := l.Replay("dev-1")
+			if err != nil {
+				t.Fatalf("Replay: %v", err)
+			}
+			if len(ops) != tt.wantOpsAfter {
+				t.Errorf("ops after = %d, want %d", len(ops), tt.wantOpsAfter)
+			}
+
+			if tt.wantDocKey != "" {
+				doc, err := s.GetDocument("dev-1")
+				if err != nil {
+					t.Fatalf("GetDocument: %v", err)
+				}
+				if _, ok := doc.Reported.Values[tt.wantDocKey]; !ok {
+					t.Errorf("expected doc to have reported key %q", tt.wantDocKey)
+				}
+			}
+		})
+	}
+}
+
+func TestPolicyMaxBytes(t *testing.T) {
+	tests := []struct {
+		name         string
+		maxBytes     int64
+		dataSize     int
+		appendCount  int
+		wantOpsAfter int
+	}{
+		{
+			name:         "under threshold no compaction",
+			maxBytes:     100,
+			dataSize:     10,
+			appendCount:  10,
+			wantOpsAfter: 10,
+		},
+		{
+			name:         "exceeding threshold triggers snapshot",
+			maxBytes:     25,
+			dataSize:     10,
+			appendCount:  3,
+			wantOpsAfter: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := memstore.New()
+			l := New(s, WithPolicy(Policy{MaxBytes: tt.maxBytes}))
+
+			data := make([]byte, tt.dataSize)
+			for i := range tt.appendCount {
+				op := shadow.Op{
+					ID:        shadow.OpID{NodeID: 1, Seq: uint64(i + 1)},
+					DeviceID:  "dev-1",
+					Section:   shadow.SectionReported,
+					Key:       "temp",
+					Data:      data,
+					Timestamp: hlc.Timestamp{Physical: int64((i + 1) * 100)},
+				}
+				if err := l.Append(op); err != nil {
+					t.Fatalf("Append %d: %v", i, err)
+				}
+			}
+
+			ops, err := l.Replay("dev-1")
+			if err != nil {
+				t.Fatalf("Replay: %v", err)
+			}
+			if len(ops) != tt.wantOpsAfter {
+				t.Errorf("ops after = %d, want %d", len(ops), tt.wantOpsAfter)
+			}
+		})
+	}
+}
+
+func TestPolicyNoEffect(t *testing.T) {
+	// Without a policy, ops accumulate without compaction.
+	s := memstore.New()
+	l := New(s)
+
+	for i := range 100 {
+		op := shadow.Op{
+			ID:        shadow.OpID{NodeID: 1, Seq: uint64(i + 1)},
+			DeviceID:  "dev-1",
+			Section:   shadow.SectionReported,
+			Key:       "temp",
+			Data:      make([]byte, 1000),
+			Timestamp: hlc.Timestamp{Physical: int64((i + 1) * 100)},
+		}
+		if err := l.Append(op); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+
+	ops, err := l.Replay("dev-1")
+	if err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if len(ops) != 100 {
+		t.Errorf("ops = %d, want 100", len(ops))
+	}
+}
+
+func itoa(n int) string {
+	if n < 10 {
+		return string(rune('0' + n))
+	}
+	return itoa(n/10) + string(rune('0'+n%10))
+}
+
 // Verify the interface is satisfied at compile time.
 var _ store.Store = (*memstore.MemStore)(nil)
