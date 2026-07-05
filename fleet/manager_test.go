@@ -378,3 +378,112 @@ func TestManagerDeviceStateUnknown(t *testing.T) {
 		t.Error("DeviceState returned true for unknown device")
 	}
 }
+
+func TestManagerHandleAck(t *testing.T) {
+	mgr, device, ft := newTestManager(t, 1)
+
+	mgr.SetDesired("dev-0000", "mode", []byte("auto"))
+	mgr.Tick(ft.ns)
+
+	// Capture the OpID from the frame sent to the device.
+	var opID shadow.OpID
+	select {
+	case d := <-device.Inbound():
+		id, _, _, _, err := converge.ParseFragmentHeader(d.Frame)
+		if err != nil {
+			t.Fatal(err)
+		}
+		opID = id
+	default:
+		t.Fatal("no frame on device side")
+	}
+
+	// Ack the op.
+	if err := mgr.HandleAck("dev-0000", opID); err != nil {
+		t.Fatalf("HandleAck: %v", err)
+	}
+
+	// Unknown device returns error.
+	if err := mgr.HandleAck("dev-unknown", opID); !errors.Is(err, ErrUnknownDevice) {
+		t.Errorf("HandleAck(unknown) = %v, want ErrUnknownDevice", err)
+	}
+}
+
+func TestManagerHandleNack(t *testing.T) {
+	mgr, device, ft := newTestManager(t, 1)
+
+	mgr.SetDesired("dev-0000", "mode", []byte("auto"))
+	mgr.Tick(ft.ns)
+	drainAll(device)
+
+	// Nack transitions to Diverged.
+	if err := mgr.HandleNack("dev-0000", shadow.OpID{NodeID: 1, Seq: 1}); err != nil {
+		t.Fatalf("HandleNack: %v", err)
+	}
+
+	state, _ := mgr.DeviceState("dev-0000")
+	if state != converge.Diverged {
+		t.Errorf("state after HandleNack = %v, want Diverged", state)
+	}
+
+	// Unknown device returns error.
+	if err := mgr.HandleNack("dev-unknown", shadow.OpID{}); !errors.Is(err, ErrUnknownDevice) {
+		t.Errorf("HandleNack(unknown) = %v, want ErrUnknownDevice", err)
+	}
+}
+
+func TestManagerDrainInboundMultiFragment(t *testing.T) {
+	// Use a small max frame size to force fragmentation.
+	ft := &fixedTime{ns: int64(time.Second)}
+	clock := hlc.NewClock(1, ft)
+	s := memstore.New()
+	controller, device := testutil.NewLossyMuxPair(40, nil) // tiny frames
+
+	mgr := NewManager(ManagerConfig{
+		Store:     s,
+		Transport: controller,
+		Clock:     clock,
+		Timeout:   5 * time.Second,
+		Budget:    BudgetConfig{MaxTokens: 3, RefillInterval: time.Second},
+		EventSize: 128,
+	})
+	mgr.Add("dev-0000")
+	mgr.SetDesired("dev-0000", "mode", []byte("auto"))
+	mgr.Tick(ft.ns)
+
+	// Drain device side (controller sent fragmented desired ops).
+	drainAll(device)
+
+	// Now simulate a multi-fragment reported op from the device.
+	ft.advance(time.Second)
+	reportOp := shadow.Op{
+		ID:        shadow.OpID{NodeID: 2, Seq: 1},
+		DeviceID:  "dev-0000",
+		Section:   shadow.SectionReported,
+		Key:       "mode",
+		Data:      []byte("auto"),
+		Timestamp: hlc.Timestamp{Physical: ft.ns, NodeID: 2},
+	}
+	payload := converge.EncodeOp(reportOp)
+	frames, err := converge.Fragment(reportOp.ID, payload, 40)
+	if err != nil {
+		t.Fatalf("Fragment: %v", err)
+	}
+	if len(frames) < 2 {
+		t.Fatalf("expected multi-fragment, got %d frames", len(frames))
+	}
+
+	// Send fragments to controller (via device transport).
+	for _, frame := range frames {
+		if err := device.Send(transport.Channel("dev-0000"), frame); err != nil {
+			t.Fatalf("device.Send: %v", err)
+		}
+	}
+
+	mgr.DrainInbound()
+
+	state, _ := mgr.DeviceState("dev-0000")
+	if state != converge.Synced {
+		t.Errorf("state after multi-fragment DrainInbound = %v, want Synced", state)
+	}
+}

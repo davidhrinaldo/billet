@@ -44,10 +44,10 @@ type ManagerConfig struct {
 }
 
 // Manager orchestrates convergence for a fleet of devices. It is safe for
-// concurrent use — internal locking serializes access to per-device
-// reconcilers.
+// concurrent use. A RWMutex protects the device map, and each device has its
+// own mutex to minimize contention across independent devices.
 type Manager struct {
-	mu      sync.Mutex
+	mu      sync.RWMutex // protects the devices map
 	cfg     ManagerConfig
 	devices map[shadow.DeviceID]*deviceEntry
 	events  chan Event
@@ -55,11 +55,20 @@ type Manager struct {
 
 // deviceEntry holds per-device state managed by the Manager.
 type deviceEntry struct {
+	mu         sync.Mutex // serializes access to this device's reconciler
 	reconciler *converge.Reconciler
 	log        *oplog.Log
 	budget     budget
 	lastState  converge.State
 	stalledAt  int64 // physical ns when device entered current non-Synced state
+	fragments  map[shadow.OpID]*fragmentSet
+}
+
+// fragmentSet buffers partial fragments for a single op until all arrive.
+type fragmentSet struct {
+	total    uint16
+	received int
+	payloads map[uint16][]byte // fragment index → payload bytes
 }
 
 // NewManager creates a Manager for orchestrating fleet convergence.
@@ -105,6 +114,7 @@ func (m *Manager) Add(id shadow.DeviceID) {
 		log:        lg,
 		budget:     newBudget(m.cfg.Budget, 0),
 		lastState:  converge.Synced,
+		fragments:  make(map[shadow.OpID]*fragmentSet),
 	}
 }
 
@@ -119,13 +129,16 @@ func (m *Manager) Remove(id shadow.DeviceID) {
 // SetDesired sets a desired key-value pair for a single device. Returns
 // ErrUnknownDevice if the device has not been added.
 func (m *Manager) SetDesired(id shadow.DeviceID, key string, data []byte) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	m.mu.RLock()
 	entry, ok := m.devices[id]
+	m.mu.RUnlock()
+
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrUnknownDevice, id)
 	}
+
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
 	return entry.reconciler.SetDesired(key, data)
 }
 
@@ -154,8 +167,8 @@ func (e *GroupError) Error() string {
 // attempts all devices and collects errors. Returns nil if all succeed, or a
 // *GroupError with per-device errors.
 func (m *Manager) SetDesiredGroup(ids []shadow.DeviceID, key string, data []byte) *GroupError {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
 	var errs map[shadow.DeviceID]error
 	for _, id := range ids {
@@ -167,7 +180,10 @@ func (m *Manager) SetDesiredGroup(ids []shadow.DeviceID, key string, data []byte
 			errs[id] = fmt.Errorf("%w: %s", ErrUnknownDevice, id)
 			continue
 		}
-		if err := entry.reconciler.SetDesired(key, data); err != nil {
+		entry.mu.Lock()
+		err := entry.reconciler.SetDesired(key, data)
+		entry.mu.Unlock()
+		if err != nil {
 			if errs == nil {
 				errs = make(map[shadow.DeviceID]error)
 			}
@@ -182,16 +198,9 @@ func (m *Manager) SetDesiredGroup(ids []shadow.DeviceID, key string, data []byte
 
 // DrainInbound reads all pending deliveries from the transport and routes them
 // to the appropriate per-device reconcilers. Frames addressed to unknown
-// devices are silently ignored.
-//
-// Each delivery is decoded as a single-fragment op and applied as a reported
-// update via OnReported. Multi-fragment reassembly is not performed here — the
-// transport is assumed to deliver complete ops (or the device-side encoder
-// fits ops into single frames).
+// devices are silently ignored. Multi-fragment ops are reassembled
+// automatically.
 func (m *Manager) DrainInbound() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	ch := m.cfg.Transport.Inbound()
 	for {
 		select {
@@ -203,60 +212,137 @@ func (m *Manager) DrainInbound() {
 	}
 }
 
-// handleDelivery processes a single inbound delivery. Caller must hold mu.
+// handleDelivery processes a single inbound delivery, buffering fragments
+// until a complete op can be reassembled.
 func (m *Manager) handleDelivery(d transport.Delivery) {
 	id := shadow.DeviceID(d.Channel)
+
+	m.mu.RLock()
 	entry, ok := m.devices[id]
+	m.mu.RUnlock()
 	if !ok {
 		return
 	}
 
-	// Parse the fragment header to extract the OpID, then decode the op.
-	opID, _, _, payload, err := converge.ParseFragmentHeader(d.Frame)
-	if err != nil {
-		return
-	}
-	op, err := converge.DecodeOp(opID, payload)
+	// Parse the fragment header.
+	opID, index, total, payload, err := converge.ParseFragmentHeader(d.Frame)
 	if err != nil {
 		return
 	}
 
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+
+	// Fast path: single-fragment op (most common case).
+	if total == 1 {
+		op, err := converge.DecodeOp(opID, payload)
+		if err != nil {
+			return
+		}
+		_ = entry.reconciler.OnReported(op)
+		return
+	}
+
+	// Multi-fragment: buffer until complete.
+	fs, ok := entry.fragments[opID]
+	if !ok {
+		fs = &fragmentSet{
+			total:    total,
+			payloads: make(map[uint16][]byte, total),
+		}
+		entry.fragments[opID] = fs
+	}
+
+	if _, dup := fs.payloads[index]; !dup {
+		cp := make([]byte, len(payload))
+		copy(cp, payload)
+		fs.payloads[index] = cp
+		fs.received++
+	}
+
+	if fs.received < int(fs.total) {
+		return
+	}
+
+	// All fragments received — reassemble in order.
+	var fullPayload []byte
+	for i := range fs.total {
+		fullPayload = append(fullPayload, fs.payloads[i]...)
+	}
+	delete(entry.fragments, opID)
+
+	op, err := converge.DecodeOp(opID, fullPayload)
+	if err != nil {
+		return
+	}
 	_ = entry.reconciler.OnReported(op)
+}
+
+// HandleAck routes an acknowledgment to the appropriate device's reconciler.
+// Returns ErrUnknownDevice if the device has not been added.
+func (m *Manager) HandleAck(deviceID shadow.DeviceID, id shadow.OpID) error {
+	m.mu.RLock()
+	entry, ok := m.devices[deviceID]
+	m.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrUnknownDevice, deviceID)
+	}
+
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	return entry.reconciler.OnAck(id)
+}
+
+// HandleNack routes a rejection to the appropriate device's reconciler,
+// transitioning it to the Diverged state. Returns ErrUnknownDevice if the
+// device has not been added.
+func (m *Manager) HandleNack(deviceID shadow.DeviceID, id shadow.OpID) error {
+	m.mu.RLock()
+	entry, ok := m.devices[deviceID]
+	m.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrUnknownDevice, deviceID)
+	}
+
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	entry.reconciler.OnNack(id)
+	return nil
 }
 
 // Tick advances the fleet by one time step. It refills rate-limiter budgets,
 // flushes pending devices that have available budget, ticks all reconcilers to
 // detect timeouts, and emits observability events for state transitions.
 func (m *Manager) Tick(nowPhysicalNs int64) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
-	// Phase 1: refill all budgets.
-	for _, entry := range m.devices {
+	for id, entry := range m.devices {
+		entry.mu.Lock()
+
+		// Phase 1: refill budget.
 		entry.budget.refill(nowPhysicalNs)
-	}
 
-	// Phase 2: flush pending devices with available budget.
-	for _, entry := range m.devices {
+		// Phase 2: flush if pending and budget allows.
 		if entry.reconciler.CurrentState() == converge.Pending && entry.budget.consume() {
 			if err := entry.reconciler.Flush(); err != nil {
+				entry.mu.Unlock()
 				return err
 			}
 		}
-	}
 
-	// Phase 3: tick all reconcilers (timeout/retry).
-	for _, entry := range m.devices {
+		// Phase 3: tick reconciler (timeout/retry).
 		state := entry.reconciler.CurrentState()
 		if state == converge.Inflight || state == converge.TimedOut {
 			if err := entry.reconciler.Tick(nowPhysicalNs); err != nil {
+				entry.mu.Unlock()
 				return err
 			}
 		}
-	}
 
-	// Phase 4: detect state changes and emit events.
-	for id, entry := range m.devices {
+		// Phase 4: detect state change and emit event.
 		cur := entry.reconciler.CurrentState()
 		if cur != entry.lastState {
 			m.emitEvent(Event{
@@ -267,7 +353,6 @@ func (m *Manager) Tick(nowPhysicalNs int64) error {
 				At:       nowPhysicalNs,
 			})
 
-			// Update stall tracking.
 			if cur == converge.Synced {
 				entry.stalledAt = 0
 			} else if entry.lastState == converge.Synced {
@@ -275,6 +360,8 @@ func (m *Manager) Tick(nowPhysicalNs int64) error {
 			}
 			entry.lastState = cur
 		}
+
+		entry.mu.Unlock()
 	}
 
 	return nil
@@ -310,17 +397,21 @@ func (m *Manager) Events() <-chan Event {
 // StallReport returns a snapshot of all devices that have not reached the
 // Synced state.
 func (m *Manager) StallReport() StallReport {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
 	var report StallReport
 	for id, entry := range m.devices {
+		entry.mu.Lock()
 		state := entry.reconciler.CurrentState()
+		stalledAt := entry.stalledAt
+		entry.mu.Unlock()
+
 		if state != converge.Synced {
 			report.Stalled = append(report.Stalled, StalledDevice{
 				DeviceID: id,
 				State:    state,
-				Since:    entry.stalledAt,
+				Since:    stalledAt,
 			})
 		}
 	}
@@ -330,24 +421,31 @@ func (m *Manager) StallReport() StallReport {
 // DeviceState returns the current convergence state of a device. The second
 // return value is false if the device is not registered.
 func (m *Manager) DeviceState(id shadow.DeviceID) (converge.State, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	m.mu.RLock()
 	entry, ok := m.devices[id]
+	m.mu.RUnlock()
+
 	if !ok {
 		return 0, false
 	}
+
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
 	return entry.reconciler.CurrentState(), true
 }
 
 // Lagging returns the device IDs of all devices not in the Synced state.
 func (m *Manager) Lagging() []shadow.DeviceID {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
 	var ids []shadow.DeviceID
 	for id, entry := range m.devices {
-		if entry.reconciler.CurrentState() != converge.Synced {
+		entry.mu.Lock()
+		state := entry.reconciler.CurrentState()
+		entry.mu.Unlock()
+
+		if state != converge.Synced {
 			ids = append(ids, id)
 		}
 	}
@@ -356,7 +454,7 @@ func (m *Manager) Lagging() []shadow.DeviceID {
 
 // Devices returns the number of devices registered in the fleet.
 func (m *Manager) Devices() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return len(m.devices)
 }
