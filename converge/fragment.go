@@ -34,31 +34,50 @@ var ErrIncomplete = errors.New("converge: incomplete fragment set")
 // ErrFragmentMismatch is returned when fragments have inconsistent totals or OpIDs.
 var ErrFragmentMismatch = errors.New("converge: fragment total or OpID mismatch")
 
+// wireVersion is the version marker byte prepended to versioned op encodings.
+// The value 0xBE ("billet encoding") is chosen to be distinguishable from any
+// valid SectionType (1 or 2), so legacy unversioned payloads can be detected.
+const wireVersion byte = 0xBE
+
+// wireV1 is the first versioned encoding format.
+const wireV1 byte = 0x01
+
+// ErrUnknownWireVersion is returned when DecodeOp encounters a version it
+// does not support.
+var ErrUnknownWireVersion = errors.New("converge: unknown wire format version")
+
 // EncodeOp serializes an Op into a byte slice suitable for fragmentation.
-// Format:
+// The encoding is versioned: a 0xBE marker byte followed by a version byte
+// allows future format changes with backward compatibility.
 //
-//	[0:1]   SectionType  uint8
-//	[1:9]   Timestamp.Physical  int64 big-endian
-//	[9:11]  Timestamp.Logical   uint16 big-endian
-//	[11:13] Timestamp.NodeID    uint16 big-endian
-//	[13:15] KeyLen      uint16 big-endian
-//	[15:15+KeyLen] Key  []byte
-//	[15+KeyLen:17+KeyLen] DeviceIDLen uint16 big-endian
-//	[17+KeyLen:17+KeyLen+DeviceIDLen] DeviceID []byte
-//	[17+KeyLen+DeviceIDLen:] Data []byte
+// V1 format:
+//
+//	[0]     0xBE        version marker
+//	[1]     0x01        version number
+//	[2]     SectionType uint8
+//	[3:11]  Timestamp.Physical  int64 big-endian
+//	[11:13] Timestamp.Logical   uint16 big-endian
+//	[13:15] Timestamp.NodeID    uint16 big-endian
+//	[15:17] KeyLen      uint16 big-endian
+//	[17:17+KeyLen] Key  []byte
+//	[17+KeyLen:19+KeyLen] DeviceIDLen uint16 big-endian
+//	[19+KeyLen:19+KeyLen+DeviceIDLen] DeviceID []byte
+//	[19+KeyLen+DeviceIDLen:] Data []byte
 func EncodeOp(op shadow.Op) []byte {
 	keyBytes := []byte(op.Key)
 	devBytes := []byte(op.DeviceID)
-	size := 1 + 8 + 2 + 2 + 2 + len(keyBytes) + 2 + len(devBytes) + len(op.Data)
+	size := 2 + 1 + 8 + 2 + 2 + 2 + len(keyBytes) + 2 + len(devBytes) + len(op.Data)
 	buf := make([]byte, size)
 
-	buf[0] = byte(op.Section)
-	binary.BigEndian.PutUint64(buf[1:9], uint64(op.Timestamp.Physical))
-	binary.BigEndian.PutUint16(buf[9:11], op.Timestamp.Logical)
-	binary.BigEndian.PutUint16(buf[11:13], op.Timestamp.NodeID)
-	binary.BigEndian.PutUint16(buf[13:15], uint16(len(keyBytes)))
-	copy(buf[15:], keyBytes)
-	off := 15 + len(keyBytes)
+	buf[0] = wireVersion
+	buf[1] = wireV1
+	buf[2] = byte(op.Section)
+	binary.BigEndian.PutUint64(buf[3:11], uint64(op.Timestamp.Physical))
+	binary.BigEndian.PutUint16(buf[11:13], op.Timestamp.Logical)
+	binary.BigEndian.PutUint16(buf[13:15], op.Timestamp.NodeID)
+	binary.BigEndian.PutUint16(buf[15:17], uint16(len(keyBytes)))
+	copy(buf[17:], keyBytes)
+	off := 17 + len(keyBytes)
 	binary.BigEndian.PutUint16(buf[off:off+2], uint16(len(devBytes)))
 	copy(buf[off+2:], devBytes)
 	off += 2 + len(devBytes)
@@ -68,7 +87,60 @@ func EncodeOp(op shadow.Op) []byte {
 
 // DecodeOp deserializes an Op from bytes produced by EncodeOp. The OpID must
 // be supplied separately (it is carried in the fragment header).
+//
+// DecodeOp supports both the current versioned format (0xBE prefix) and the
+// legacy unversioned format for backward compatibility. Legacy payloads begin
+// with a SectionType byte (0x01 or 0x02), which is never 0xBE.
 func DecodeOp(id shadow.OpID, data []byte) (shadow.Op, error) {
+	if len(data) < 2 {
+		return shadow.Op{}, fmt.Errorf("converge: encoded op too short (%d bytes)", len(data))
+	}
+
+	if data[0] == wireVersion {
+		return decodeOpV1(id, data)
+	}
+	return decodeOpLegacy(id, data)
+}
+
+// decodeOpV1 decodes the versioned wire format (v1).
+func decodeOpV1(id shadow.OpID, data []byte) (shadow.Op, error) {
+	if data[1] != wireV1 {
+		return shadow.Op{}, fmt.Errorf("%w: %d", ErrUnknownWireVersion, data[1])
+	}
+	if len(data) < 17 {
+		return shadow.Op{}, fmt.Errorf("converge: encoded op too short (%d bytes)", len(data))
+	}
+
+	op := shadow.Op{ID: id}
+	op.Section = shadow.SectionType(data[2])
+	op.Timestamp.Physical = int64(binary.BigEndian.Uint64(data[3:11]))
+	op.Timestamp.Logical = binary.BigEndian.Uint16(data[11:13])
+	op.Timestamp.NodeID = binary.BigEndian.Uint16(data[13:15])
+
+	keyLen := int(binary.BigEndian.Uint16(data[15:17]))
+	if len(data) < 17+keyLen+2 {
+		return shadow.Op{}, fmt.Errorf("converge: encoded op truncated at key")
+	}
+	op.Key = string(data[17 : 17+keyLen])
+
+	off := 17 + keyLen
+	devLen := int(binary.BigEndian.Uint16(data[off : off+2]))
+	if len(data) < off+2+devLen {
+		return shadow.Op{}, fmt.Errorf("converge: encoded op truncated at device ID")
+	}
+	op.DeviceID = string(data[off+2 : off+2+devLen])
+
+	off += 2 + devLen
+	if off < len(data) {
+		op.Data = make([]byte, len(data)-off)
+		copy(op.Data, data[off:])
+	}
+	return op, nil
+}
+
+// decodeOpLegacy decodes the original unversioned wire format. Kept for
+// backward compatibility with payloads encoded before wire versioning.
+func decodeOpLegacy(id shadow.OpID, data []byte) (shadow.Op, error) {
 	if len(data) < 15 {
 		return shadow.Op{}, fmt.Errorf("converge: encoded op too short (%d bytes)", len(data))
 	}

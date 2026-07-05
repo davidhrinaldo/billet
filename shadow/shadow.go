@@ -1,5 +1,7 @@
 // Package shadow defines the core domain types for billet's device shadow:
 // documents with reported/desired sections, operations, and delta computation.
+//
+// v0.1 API — do not break.
 package shadow
 
 import (

@@ -1,6 +1,8 @@
 // Package oplog provides higher-level op-log operations on top of store.Store.
 // It coordinates append, replay, snapshot, and truncation of operations for a
 // single device's shadow document.
+//
+// v0.1 API — do not break.
 package oplog
 
 import (

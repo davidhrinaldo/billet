@@ -213,7 +213,8 @@ func (m *Manager) DrainInbound() {
 }
 
 // handleDelivery processes a single inbound delivery, buffering fragments
-// until a complete op can be reassembled.
+// until a complete op can be reassembled. Parse and decode errors are emitted
+// as EventError events rather than silently dropped.
 func (m *Manager) handleDelivery(d transport.Delivery) {
 	id := shadow.DeviceID(d.Channel)
 
@@ -227,6 +228,11 @@ func (m *Manager) handleDelivery(d transport.Delivery) {
 	// Parse the fragment header.
 	opID, index, total, payload, err := converge.ParseFragmentHeader(d.Frame)
 	if err != nil {
+		m.emitEvent(Event{
+			Kind:     EventError,
+			DeviceID: id,
+			Err:      err,
+		})
 		return
 	}
 
@@ -237,6 +243,11 @@ func (m *Manager) handleDelivery(d transport.Delivery) {
 	if total == 1 {
 		op, err := converge.DecodeOp(opID, payload)
 		if err != nil {
+			m.emitEvent(Event{
+				Kind:     EventError,
+				DeviceID: id,
+				Err:      err,
+			})
 			return
 		}
 		_ = entry.reconciler.OnReported(op)
@@ -273,6 +284,11 @@ func (m *Manager) handleDelivery(d transport.Delivery) {
 
 	op, err := converge.DecodeOp(opID, fullPayload)
 	if err != nil {
+		m.emitEvent(Event{
+			Kind:     EventError,
+			DeviceID: id,
+			Err:      err,
+		})
 		return
 	}
 	_ = entry.reconciler.OnReported(op)
@@ -315,7 +331,11 @@ func (m *Manager) HandleNack(deviceID shadow.DeviceID, id shadow.OpID) error {
 // Tick advances the fleet by one time step. It refills rate-limiter budgets,
 // flushes pending devices that have available budget, ticks all reconcilers to
 // detect timeouts, and emits observability events for state transitions.
-func (m *Manager) Tick(nowPhysicalNs int64) error {
+//
+// Per-device errors (store unavailable, transport down) are emitted as
+// EventError events rather than aborting the entire tick. The affected device
+// is skipped for this tick but remains registered.
+func (m *Manager) Tick(nowPhysicalNs int64) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -328,8 +348,14 @@ func (m *Manager) Tick(nowPhysicalNs int64) error {
 		// Phase 2: flush if pending and budget allows.
 		if entry.reconciler.CurrentState() == converge.Pending && entry.budget.consume() {
 			if err := entry.reconciler.Flush(); err != nil {
+				m.emitEvent(Event{
+					Kind:     EventError,
+					DeviceID: id,
+					At:       nowPhysicalNs,
+					Err:      err,
+				})
 				entry.mu.Unlock()
-				return err
+				continue
 			}
 		}
 
@@ -337,8 +363,14 @@ func (m *Manager) Tick(nowPhysicalNs int64) error {
 		state := entry.reconciler.CurrentState()
 		if state == converge.Inflight || state == converge.TimedOut {
 			if err := entry.reconciler.Tick(nowPhysicalNs); err != nil {
+				m.emitEvent(Event{
+					Kind:     EventError,
+					DeviceID: id,
+					At:       nowPhysicalNs,
+					Err:      err,
+				})
 				entry.mu.Unlock()
-				return err
+				continue
 			}
 		}
 
@@ -363,8 +395,6 @@ func (m *Manager) Tick(nowPhysicalNs int64) error {
 
 		entry.mu.Unlock()
 	}
-
-	return nil
 }
 
 // stateChangeKind returns the appropriate EventKind for a state transition.

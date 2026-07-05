@@ -1,5 +1,7 @@
 // Package resolver defines the interface for resolving conflicts in shadow
 // documents and provides the SectionAuthority implementation.
+//
+// v0.1 API — do not break.
 package resolver
 
 import (

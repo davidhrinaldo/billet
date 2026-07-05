@@ -81,9 +81,7 @@ func TestFleetConvergence400Devices(t *testing.T) {
 		mgr.DrainInbound()
 
 		// Phase 2: tick the manager (refill budgets, flush, retry timeouts).
-		if err := mgr.Tick(ft.ns); err != nil {
-			t.Fatalf("tick %d: Tick: %v", tick, err)
-		}
+		mgr.Tick(ft.ns)
 
 		// Phase 3: simulate device side — read desired ops, report back.
 		simulateDevices(t, deviceMux, ft.ns)

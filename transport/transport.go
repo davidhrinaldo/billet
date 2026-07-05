@@ -2,6 +2,8 @@
 // transport layer. The contract is committed to the weakest transport billet
 // will ever support: unreliable, unordered, non-duplex, size-capped datagrams.
 // Stronger transports advertise capabilities; core adapts.
+//
+// v0.1 API — do not break.
 package transport
 
 // Transport is the minimal contract for moving opaque frames between peers.

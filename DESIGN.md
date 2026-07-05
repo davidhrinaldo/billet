@@ -102,6 +102,30 @@ Deliverables:
 - Example integration: ChirpStack gRPC stream → billet shadow + convergence.
 - API surface review and freeze for v0.1.
 
+#### v0.1 API Freeze
+
+All public packages carry a `// v0.1 API — do not break.` marker in their
+package doc. The exported surface was audited and frozen as of M5. Packages
+covered: hlc, shadow, transport, store, history, resolver, converge, oplog,
+fleet. Implementation sub-packages (memstore, pebblestore, memhistory,
+ingothistory) and internal/testutil are not frozen.
+
+#### Wire Format
+
+EncodeOp prepends a 0xBE marker byte + version byte (currently 0x01). DecodeOp
+auto-detects legacy (unversioned) payloads by checking byte 0: if it is not
+0xBE, the legacy decoder is used. Golden test vectors in
+`converge/testdata/op_v1_*.hex` lock the encoding.
+
+#### Degradation Modes
+
+| Failure | Behavior |
+|---------|----------|
+| Store unavailable | Per-device error emitted as `EventError`; device skipped for that tick, state unchanged. |
+| Transport down | `Flush`/`Tick` error emitted as `EventError`; device stays in current state, retried next tick. |
+| History full | Caller's responsibility — billet does not write history from the fleet manager. |
+| Corrupt inbound frame | `EventError` emitted with decode error; frame dropped, device state unchanged. |
+
 ---
 
 ## Key Design Decisions

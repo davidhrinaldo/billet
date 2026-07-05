@@ -1,6 +1,8 @@
 // Package history defines the interface for numeric time-series storage of
 // reported values. The production implementation wraps ingot; the in-memory
 // stub in memhistory is for testing.
+//
+// v0.1 API — do not break.
 package history
 
 import (

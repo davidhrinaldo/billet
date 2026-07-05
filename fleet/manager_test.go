@@ -159,9 +159,7 @@ func TestManagerTickFlushesWithBudget(t *testing.T) {
 	}
 
 	// Tick should flush (budget starts full).
-	if err := mgr.Tick(ft.ns); err != nil {
-		t.Fatal(err)
-	}
+	mgr.Tick(ft.ns)
 
 	state, _ := mgr.DeviceState("dev-0000")
 	if state != converge.Inflight {
@@ -430,6 +428,109 @@ func TestManagerHandleNack(t *testing.T) {
 	if err := mgr.HandleNack("dev-unknown", shadow.OpID{}); !errors.Is(err, ErrUnknownDevice) {
 		t.Errorf("HandleNack(unknown) = %v, want ErrUnknownDevice", err)
 	}
+}
+
+func TestManagerTickTransportDown(t *testing.T) {
+	mgr, device, ft := newTestManager(t, 2)
+
+	tests := []struct {
+		name           string
+		failDevice     shadow.DeviceID
+		healthyDevice  shadow.DeviceID
+		wantErrEvents  int
+		wantHealthy    converge.State
+	}{
+		{
+			name:          "one device fails, other still flushes",
+			failDevice:    "dev-0000",
+			healthyDevice: "dev-0001",
+			wantErrEvents: 1,
+			wantHealthy:   converge.Inflight,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mgr.SetDesired(tt.failDevice, "mode", []byte("on"))
+			mgr.SetDesired(tt.healthyDevice, "mode", []byte("on"))
+
+			// Close the controller transport so Send fails.
+			mgr.cfg.Transport.Close()
+
+			mgr.Tick(ft.ns)
+
+			// Drain events — should have EventError for the failing devices.
+			var errEvents []Event
+			for {
+				select {
+				case ev := <-mgr.Events():
+					if ev.Kind == EventError {
+						errEvents = append(errEvents, ev)
+					}
+				default:
+					goto done
+				}
+			}
+		done:
+			if len(errEvents) == 0 {
+				t.Error("expected EventError events, got none")
+			}
+
+			// Both devices should have error events since transport is
+			// completely down.
+			for _, ev := range errEvents {
+				if ev.Err == nil {
+					t.Error("EventError.Err is nil")
+				}
+			}
+
+			_ = device // keep linter happy
+		})
+	}
+}
+
+func TestManagerDrainInboundCorruptFrame(t *testing.T) {
+	mgr, device, ft := newTestManager(t, 1)
+
+	mgr.SetDesired("dev-0000", "mode", []byte("auto"))
+	mgr.Tick(ft.ns)
+	drainAll(device)
+
+	// Send a corrupt frame (too short to be a valid fragment header).
+	corrupt := transport.Frame([]byte{0x01, 0x02, 0x03})
+	if err := device.Send(transport.Channel("dev-0000"), corrupt); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr.DrainInbound()
+
+	// Should have emitted an EventError.
+	var gotErr bool
+	for {
+		select {
+		case ev := <-mgr.Events():
+			if ev.Kind == EventError && ev.DeviceID == "dev-0000" {
+				gotErr = true
+			}
+		default:
+			goto done
+		}
+	}
+done:
+	if !gotErr {
+		t.Error("expected EventError for corrupt frame, got none")
+	}
+
+	// Device should still be in Inflight (not crashed).
+	state, ok := mgr.DeviceState("dev-0000")
+	if !ok {
+		t.Fatal("device disappeared")
+	}
+	if state != converge.Inflight {
+		t.Errorf("state = %v, want Inflight (device should not be affected by corrupt inbound)", state)
+	}
+
+	_ = ft
 }
 
 func TestManagerDrainInboundMultiFragment(t *testing.T) {

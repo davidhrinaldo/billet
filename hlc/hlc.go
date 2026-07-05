@@ -8,6 +8,8 @@
 //	Kulkarni, S., Demirbas, M., Madappa, D., Avva, B., & Leone, M. (2014).
 //	"Logical Physical Clocks and Consistent Snapshots in Globally Distributed
 //	Databases." https://cse.buffalo.edu/tech-reports/2014-04.pdf
+//
+// v0.1 API — do not break.
 package hlc
 
 import (

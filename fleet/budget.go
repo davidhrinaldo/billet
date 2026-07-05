@@ -1,6 +1,8 @@
 // Package fleet provides multi-device convergence management for billet. It
 // orchestrates a fleet of devices, fans out desired-state changes, enforces
 // per-device downlink budgets, and surfaces observability events.
+//
+// v0.1 API — do not break.
 package fleet
 
 import "time"

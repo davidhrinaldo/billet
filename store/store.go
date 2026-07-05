@@ -1,5 +1,7 @@
 // Package store defines the interface for billet's durable state storage.
 // The store holds current shadow documents and the operation log.
+//
+// v0.1 API — do not break.
 package store
 
 import (
