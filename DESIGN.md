@@ -80,6 +80,13 @@ Deliverables:
 
 Done when: sustained write load on Pi-class hardware stays within flash-write budget; ingot holds 90+ days of 1-min data for 64 channels in <100 MB.
 
+#### Storage validation
+
+`TestCompacted90DayStorage` (history/ingothistory/bench_test.go) simulates 90
+days × 64 channels × 1-min samples with flush every 2h and compaction every
+day. Result: 91.56 MB (11.58 bytes/sample). Head-only extrapolation was 307 MB;
+compacted XOR encoding is 3.3× smaller. Skipped with `-short`.
+
 ---
 
 ### M4 — Fleet Convergence
