@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Billet Fleet Console</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --border: #2a2d3a;
+    --text: #e1e4ed;
+    --text-dim: #8b8fa3;
+    --synced: #34d399;
+    --pending: #60a5fa;
+    --inflight: #fbbf24;
+    --timedout: #fb923c;
+    --diverged: #f87171;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 16px; font-weight: 600; letter-spacing: 1px; }
+  header .meta { color: var(--text-dim); font-size: 12px; }
+
+  .main { display: flex; flex-direction: column; height: calc(100vh - 53px); }
+
+  /* Chaos panel */
+  .chaos {
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .chaos h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 2px; color: var(--text-dim); margin-bottom: 12px; }
+  .chaos-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+  .chaos-row:last-child { margin-bottom: 0; }
+
+  button {
+    background: var(--border);
+    color: var(--text);
+    border: 1px solid #3a3d4a;
+    padding: 5px 14px;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  button:hover { background: #3a3d4a; }
+  button.danger { border-color: var(--diverged); color: var(--diverged); }
+  button.danger:hover { background: rgba(248,113,113,0.15); }
+  button.heal { border-color: var(--synced); color: var(--synced); }
+  button.heal:hover { background: rgba(52,211,153,0.15); }
+
+  select, input[type="text"] {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 5px 10px;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 12px;
+  }
+  input[type="range"] { width: 100px; accent-color: var(--inflight); }
+  label { color: var(--text-dim); font-size: 12px; }
+
+  /* Device grid */
+  .grid-container { flex: 1; overflow-y: auto; padding: 16px 24px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 12px;
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px;
+    transition: border-color 0.3s;
+  }
+  .card.partitioned { border-color: var(--diverged); border-style: dashed; background: rgba(248,113,113,0.04); }
+  .partition-label {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    color: var(--diverged);
+    text-align: center;
+    padding: 2px 0;
+    margin-bottom: 4px;
+    background: rgba(248,113,113,0.1);
+    border-radius: 3px;
+  }
+  .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .card-id { font-weight: 600; font-size: 13px; }
+  .card-id:hover { text-decoration: underline; }
+  .state-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+  .state-badge .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+  .state-Synced { background: rgba(52,211,153,0.15); color: var(--synced); }
+  .state-Synced .dot { background: var(--synced); }
+  .state-Pending { background: rgba(96,165,250,0.15); color: var(--pending); }
+  .state-Pending .dot { background: var(--pending); }
+  .state-Inflight { background: rgba(251,191,36,0.15); color: var(--inflight); }
+  .state-Inflight .dot { background: var(--inflight); }
+  .state-TimedOut { background: rgba(251,146,60,0.15); color: var(--timedout); }
+  .state-TimedOut .dot { background: var(--timedout); }
+  .state-Diverged { background: rgba(248,113,113,0.15); color: var(--diverged); }
+  .state-Diverged .dot { background: var(--diverged); animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+  .link-status {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--timedout);
+    text-align: center;
+    padding: 2px 0;
+    margin-bottom: 4px;
+    background: rgba(251,146,60,0.1);
+    border-radius: 3px;
+  }
+  .log-hint { color: var(--text-dim); font-style: italic; padding: 8px 0; }
+  .card-kv { margin-top: 8px; }
+  .kv-row { display: flex; justify-content: space-between; font-size: 12px; padding: 2px 0; }
+  .kv-label { color: var(--text-dim); }
+  .kv-val { font-weight: 500; }
+  .kv-val.diff { color: var(--inflight); }
+  .card-footer { margin-top: 8px; font-size: 11px; color: var(--text-dim); }
+
+  /* Event log */
+  .log-container {
+    height: 160px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .log-header {
+    padding: 8px 24px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+  }
+  .log {
+    height: calc(160px - 33px);
+    overflow-y: auto;
+    padding: 4px 24px;
+    font-size: 12px;
+  }
+  .log-entry { padding: 2px 0; }
+  .log-entry .ts { color: var(--text-dim); margin-right: 8px; }
+  .log-entry .dev { margin-right: 8px; font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>BILLET FLEET CONSOLE</h1>
+  <div class="meta" id="meta">connecting...</div>
+</header>
+
+<div class="main">
+  <div class="chaos">
+    <h2>Chaos Panel</h2>
+    <div class="chaos-row">
+      <button onclick="pushUpdate()" style="border-color:var(--pending);color:var(--pending)">Push Update to All</button>
+      <span style="width:16px"></span>
+      <button class="danger" onclick="fault('partitionAll')">Partition All</button>
+      <button class="heal" onclick="fault('healAll')">Heal All</button>
+      <span style="width:24px"></span>
+      <label>Device:</label>
+      <select id="deviceSelect" onchange="syncLinkControls()"></select>
+      <button class="danger" onclick="faultDevice('partition')">Partition</button>
+      <button class="heal" onclick="faultDevice('heal')">Heal</button>
+      <button onclick="reboot()">Reboot</button>
+    </div>
+    <div class="chaos-row">
+      <label>Loss: <span id="lossVal">0%</span></label>
+      <input type="range" id="lossSlider" min="0" max="100" value="0"
+             oninput="document.getElementById('lossVal').textContent=this.value+'%'">
+      <label>Delay:</label>
+      <input type="text" id="delayMin" value="0" size="4" placeholder="min ms">
+      <span style="color:var(--text-dim)">–</span>
+      <input type="text" id="delayMax" value="0" size="4" placeholder="max ms"> ms
+      <button onclick="applyLink()">Apply Link</button>
+    </div>
+    <div class="chaos-row">
+      <label>Set Desired:</label>
+      <select id="desiredDevice"></select>
+      <input type="text" id="desiredKey" value="mode" size="8" placeholder="key">
+      <input type="text" id="desiredVal" size="8" placeholder="value">
+      <button onclick="setDesired()">Send</button>
+    </div>
+  </div>
+
+  <div class="grid-container">
+    <div class="grid" id="grid"></div>
+  </div>
+
+  <div class="log-container">
+    <div class="log-header">Event Log</div>
+    <div class="log" id="log"></div>
+  </div>
+</div>
+
+<script>
+const grid = document.getElementById('grid');
+const logEl = document.getElementById('log');
+const metaEl = document.getElementById('meta');
+const deviceSelect = document.getElementById('deviceSelect');
+const desiredDevice = document.getElementById('desiredDevice');
+
+let devices = [];
+let netInfo = { inflight: 0, dropped: 0 };
+let logEntries = 0;
+const MAX_LOG = 200;
+const deviceColors = {};
+
+function colorFor(id) {
+  if (deviceColors[id]) return deviceColors[id];
+  const idx = Object.keys(deviceColors).length;
+  // Golden-angle spaced hues for max visual separation.
+  const hue = (idx * 137.508) % 360;
+  deviceColors[id] = `hsl(${hue}, 70%, 65%)`;
+  return deviceColors[id];
+}
+
+function connect() {
+  const es = new EventSource('/events');
+  es.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'snapshot') {
+      devices = msg.devices;
+      netInfo = msg.net;
+      render();
+    } else if (msg.type === 'event') {
+      addLog(msg);
+    }
+  };
+  es.onerror = () => {
+    metaEl.textContent = 'disconnected — reconnecting...';
+  };
+  es.onopen = () => {
+    metaEl.textContent = 'connected';
+  };
+}
+
+function render() {
+  // Update device selectors if device list changed.
+  const currentOpts = deviceSelect.options.length;
+  if (currentOpts !== devices.length) {
+    deviceSelect.innerHTML = '';
+    desiredDevice.innerHTML = '';
+    devices.forEach(d => {
+      deviceSelect.add(new Option(d.id, d.id));
+      desiredDevice.add(new Option(d.id, d.id));
+    });
+  }
+
+  // Update meta.
+  const synced = devices.filter(d => d.state === 'Synced').length;
+  const partitioned = devices.filter(d => d.partitioned).length;
+  let meta = `${synced}/${devices.length} synced | dropped: ${netInfo.dropped}`;
+  if (partitioned > 0) meta += ` | ${partitioned} partitioned`;
+  metaEl.textContent = meta;
+
+  // Update grid.
+  grid.innerHTML = '';
+  devices.forEach(d => {
+    const card = document.createElement('div');
+    card.className = 'card' + (d.partitioned ? ' partitioned' : '');
+
+    const reported = d.reported || {};
+    const desired = d.desired || {};
+    const deltaKeys = new Set(d.delta || []);
+    const allKeys = [...new Set([...Object.keys(reported), ...Object.keys(desired)])].sort();
+
+    let kvHtml = '';
+    allKeys.forEach(k => {
+      const r = reported[k] || '—';
+      const des = desired[k] || '—';
+      const isDiff = deltaKeys.has(k);
+      kvHtml += `
+        <div class="kv-row">
+          <span class="kv-label">${k}</span>
+          <span class="kv-val">R:${r}</span>
+          <span class="kv-val ${isDiff ? 'diff' : ''}">D:${des}</span>
+        </div>`;
+    });
+
+    const sinceStr = d.sinceMs > 0 ? (d.sinceMs / 1000).toFixed(1) + 's' : '';
+
+    let linkLabel = '';
+    if (d.partitioned) {
+      linkLabel = '<div class="partition-label">LINK DOWN</div>';
+    } else if (d.lossPct > 0 || d.maxDelayMs > 0) {
+      const parts = [];
+      if (d.lossPct > 0) parts.push(d.lossPct + '% loss');
+      if (d.maxDelayMs > 0) parts.push(d.minDelayMs + '–' + d.maxDelayMs + 'ms delay');
+      linkLabel = `<div class="link-status">${parts.join(' / ')}</div>`;
+    }
+
+    card.innerHTML = `
+      <div class="card-header">
+        <span class="card-id" style="color:${colorFor(d.id)};cursor:pointer" onclick="selectDevice('${d.id}')">${d.id}</span>
+        <span class="state-badge state-${d.state}"><span class="dot"></span>${d.state}</span>
+      </div>
+      ${linkLabel}
+      <div class="card-kv">${kvHtml || '<div style="color:var(--text-dim);font-size:12px">no keys</div>'}</div>
+      ${sinceStr ? `<div class="card-footer">${sinceStr} in ${d.state}</div>` : ''}
+    `;
+    grid.appendChild(card);
+  });
+}
+
+function addLog(ev) {
+  // Remove hint if present.
+  const hint = logEl.querySelector('.log-hint');
+  if (hint) hint.remove();
+
+  const entry = document.createElement('div');
+  entry.className = 'log-entry';
+  const now = new Date().toLocaleTimeString();
+  entry.innerHTML = `<span class="ts">${now}</span><span class="dev" style="color:${colorFor(ev.deviceId)}">${ev.deviceId}</span>${ev.from} → ${ev.to}`;
+  logEl.prepend(entry);
+  logEntries++;
+  if (logEntries > MAX_LOG) {
+    logEl.removeChild(logEl.lastChild);
+    logEntries--;
+  }
+}
+
+async function fault(action) {
+  await fetch('/api/fault', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action })
+  });
+}
+
+async function faultDevice(action) {
+  const id = deviceSelect.value;
+  if (!id) return;
+  await fetch('/api/fault', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, deviceId: id })
+  });
+}
+
+async function applyLink() {
+  const id = deviceSelect.value;
+  if (!id) return;
+  await fetch('/api/fault', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      action: 'setLink',
+      deviceId: id,
+      loss: parseInt(document.getElementById('lossSlider').value) / 100,
+      minDelayMs: parseInt(document.getElementById('delayMin').value) || 0,
+      maxDelayMs: parseInt(document.getElementById('delayMax').value) || 0
+    })
+  });
+}
+
+async function reboot() {
+  const id = deviceSelect.value;
+  if (!id) return;
+  await fetch('/api/reboot', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceId: id })
+  });
+}
+
+async function setDesired() {
+  const id = desiredDevice.value;
+  const key = document.getElementById('desiredKey').value;
+  const val = document.getElementById('desiredVal').value;
+  if (!id || !key || !val) return;
+  await fetch('/api/desired', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceId: id, key, value: val })
+  });
+}
+
+async function pushUpdate() {
+  await fetch('/api/push', { method: 'POST' });
+}
+
+function selectDevice(id) {
+  deviceSelect.value = id;
+  desiredDevice.value = id;
+  syncLinkControls();
+}
+
+function syncLinkControls() {
+  const id = deviceSelect.value;
+  const dev = devices.find(d => d.id === id);
+  if (!dev) return;
+  document.getElementById('lossSlider').value = dev.lossPct;
+  document.getElementById('lossVal').textContent = dev.lossPct + '%';
+  document.getElementById('delayMin').value = dev.minDelayMs || 0;
+  document.getElementById('delayMax').value = dev.maxDelayMs || 0;
+}
+
+// Show hint in empty event log.
+logEl.innerHTML = '<div class="log-hint">Push an update or inject a fault to see state transitions here.</div>';
+
+connect();
+</script>
+</body>
+</html>

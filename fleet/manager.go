@@ -3,6 +3,7 @@ package fleet
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -487,4 +488,82 @@ func (m *Manager) Devices() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.devices)
+}
+
+// DeviceIDs returns a sorted list of all registered device IDs.
+func (m *Manager) DeviceIDs() []shadow.DeviceID {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	ids := make([]shadow.DeviceID, 0, len(m.devices))
+	for id := range m.devices {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// Snapshot returns a point-in-time view of a device's convergence state and
+// shadow document. The second return value is false if the device is not
+// registered.
+func (m *Manager) Snapshot(id shadow.DeviceID) (DeviceSnapshot, bool) {
+	m.mu.RLock()
+	entry, ok := m.devices[id]
+	m.mu.RUnlock()
+
+	if !ok {
+		return DeviceSnapshot{}, false
+	}
+
+	entry.mu.Lock()
+	state := entry.reconciler.CurrentState()
+	since := entry.stalledAt
+	entry.mu.Unlock()
+
+	if state == converge.Synced {
+		since = 0
+	}
+
+	snap := DeviceSnapshot{
+		DeviceID: id,
+		State:    state,
+		Since:    since,
+	}
+
+	doc, err := m.cfg.Store.GetDocument(id)
+	if err != nil {
+		// No document yet — return snapshot with state only.
+		snap.Delta = shadow.Delta{Diffs: make(map[string]shadow.Diff)}
+		return snap, true
+	}
+
+	snap.Reported = flattenSection(doc.Reported)
+	snap.Desired = flattenSection(doc.Desired)
+	snap.Delta = doc.Delta()
+	return snap, true
+}
+
+// FleetSnapshot returns a DeviceSnapshot for every registered device, sorted
+// by device ID.
+func (m *Manager) FleetSnapshot() []DeviceSnapshot {
+	ids := m.DeviceIDs()
+	snaps := make([]DeviceSnapshot, 0, len(ids))
+	for _, id := range ids {
+		if snap, ok := m.Snapshot(id); ok {
+			snaps = append(snaps, snap)
+		}
+	}
+	return snaps
+}
+
+// flattenSection converts a shadow.Section into a plain map of key to data.
+func flattenSection(s shadow.Section) map[string][]byte {
+	if len(s.Values) == 0 {
+		return nil
+	}
+	m := make(map[string][]byte, len(s.Values))
+	for k, v := range s.Values {
+		m[k] = v.Data
+	}
+	return m
 }
