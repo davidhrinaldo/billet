@@ -15,7 +15,8 @@ billet/
 ├── converge/        # (M2+) Reconciler state machine
 ├── oplog/           # (M2+) Op-log snapshot/truncate
 └── internal/
-    └── testutil/    # Shared test helpers (loopback transport, clock fakes)
+    ├── testutil/    # Shared test helpers (loopback transport, clock fakes)
+    └── sim/         # Deterministic network simulator + property-based convergence tests
 ```
 
 ### Why this layout
